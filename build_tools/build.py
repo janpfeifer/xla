@@ -347,6 +347,16 @@ def main():
             r"s/@sigbuild-r2\.17-clang_/@sigbuild-r2.17-clang-cudnn9_/g",
             "github/xla/.bazelrc",
         ],
+        check=True,
+    )
+    sh(
+        [
+            "sed",
+            "-i",
+            r"s/8\.9\.7\.29/9.1.1/g",
+            "github/xla/.bazelrc",
+        ],
+        check=True,
     )
 
   with build.docker_image.pull_and_run(
