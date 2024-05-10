@@ -60,18 +60,21 @@ if is_linux_gpu_job ; then
     # which have a compute compatibility of 7.5. Se we filter out all the tests
     # that need a newer GPU:
     UNSUPPORTED_GPU_TAGS="$(echo -requires-gpu-sm{80,86,89,90}{,-only})"
-    TAGS_FILTER="${TAGS_FILTER},${UNSUPPORTED_GPU_TAGS// /,}"
+    TEST_TAGS_FILTER="${TAGS_FILTER},${UNSUPPORTED_GPU_TAGS// /,}"
+    BUILD_TAGS_FILTER="${TAGS_FILTER}"
 
     ADDITIONAL_FLAGS="$ADDITIONAL_FLAGS --nobuild_tests_only --run_under=//tools/ci_build/gpu_build:parallel_gpu_execute"
     RBE_FLAGS="--config=rbe_linux_cuda_nvcc --jobs=150"
     echo "***NOTE: nvidia-smi lists the highest CUDA version the driver supports, which may be different than the version of CUDA actually used!!***"
     nvidia-smi
 else
-    TAGS_FILTER="$TAGS_FILTER,-gpu,-requires-gpu-nvidia"
+    BUILD_TAGS_FILTER="$TAGS_FILTER,-gpu,-requires-gpu-nvidia"
+    TEST_TAGS_FILTER="$BUILD_TAGS_FILTER"
     ADDITIONAL_FLAGS="$ADDITIONAL_FLAGS --config=nonccl"
 
     if is_linux_cpu_arm64_job ; then
-        TAGS_FILTER="$TAGS_FILTER,-no_aarch64"
+        BUILD_TAGS_FILTER="$BUILD_TAGS_FILTER,-no_aarch64"
+        TEST_TAGS_FILTER="$TEST_TAGS_FILTER,-no_aarch64"
         ADDITIONAL_FLAGS="$ADDITIONAL_FLAGS --action_env PYTHON_BIN_PATH=/usr/bin/python3.11 --python_path=/usr/bin/python3.11"
         # Some cross-compile tests are not working for XLA Linux Aarch64.
         # TODO(ddunleavy): Revisit these when hermetic python is available.
@@ -86,8 +89,8 @@ fi
 # Build & test XLA
 docker exec xla bazel \
         test \
-        --build_tag_filters=$TAGS_FILTER  \
-        --test_tag_filters=$TAGS_FILTER \
+        --build_tag_filters=$BUILD_TAGS_FILTER  \
+        --test_tag_filters=$TEST_TAGS_FILTER \
         --test_output=errors \
         --keep_going \
         --features=layering_check \
