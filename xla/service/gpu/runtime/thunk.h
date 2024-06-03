@@ -451,6 +451,9 @@ class Thunk {
   static absl::StatusOr<se::Stream*> GetStreamForExecution(
       ExecutionStreamId stream_id, const ExecuteParams& params);
 
+  // Returns `true` if this thunk requires inter-GPU communication.
+  bool IsCollective() const;
+
  private:
   Kind kind_;
   std::string profile_annotation_;

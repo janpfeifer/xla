@@ -352,5 +352,37 @@ Thunk::ThunkInfo Thunk::ThunkInfo::WithProfileAnnotation(
   return thunk_info;
 }
 
+bool Thunk::IsCollective() const {
+  switch (kind()) {
+    case kNcclAllGather:
+    case kNcclAllGatherStart:
+    case kNcclAllGatherDone:
+    case kNcclAllReduce:
+    case kNcclAllReduceStart:
+    case kNcclAllReduceDone:
+    case kNcclCollectiveBroadcast:
+    case kNcclCollectiveBroadcastStart:
+    case kNcclCollectiveBroadcastDone:
+    case kNcclCollectivePermute:
+    case kNcclCollectivePermuteStart:
+    case kNcclCollectivePermuteDone:
+    case kNcclReduceScatter:
+    case kNcclReduceScatterStart:
+    case kNcclReduceScatterDone:
+    case kNcclAllToAll:
+    case kNcclAllToAllStart:
+    case kNcclAllToAllDone:
+    case kNcclSend:
+    case kNcclSendDone:
+    case kNcclRecv:
+    case kNcclRecvDone:
+    case kOutfeed:
+    case kInfeed:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace gpu
 }  // namespace xla

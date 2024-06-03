@@ -354,15 +354,27 @@ absl::Status RendezvousAfterInitialization(
     const ServiceExecutableRunOptions* run_options);
 
 absl::Status ExecuteThunks(
-    const std::string& module_name, ModuleIdentifier module_id,
-    const ThunkSequence& thunk_sequence,
+    const DebugOptions* debug_options, const std::string& module_name,
+    ModuleIdentifier module_id, const ThunkSequence& thunk_sequence,
     Thunk::ExecutableSource executable_source,
     const ServiceExecutableRunOptions* run_options,
     const BufferAllocations& buffer_allocations, bool block_host_until_done,
-    bool use_highest_priority_for_async_stream,
     const absl::flat_hash_set<ExecutionStreamId>& execution_stream_ids,
-    int64_t collective_max_nchannels, int64_t p2p_max_nchannels,
     const ModuleAnnotations& module_annotations) {
+  bool mock_collectives = run_options->run_options()
+                              .gpu_executable_run_options()
+                              ->enable_mock_nccl_collectives();
+
+  int64_t collective_max_nchannels =
+      debug_options ? debug_options->xla_gpu_nccl_collective_max_nchannels()
+                    : 0;
+  int64_t p2p_max_nchannels =
+      debug_options ? debug_options->xla_gpu_nccl_p2p_max_nchannels() : 0;
+  bool use_highest_priority_for_async_stream =
+      debug_options
+          ? debug_options->xla_gpu_enable_highest_priority_async_stream()
+          : false;
+
   se::Stream* main_stream = run_options->stream();
   se::StreamExecutor* executor = main_stream->parent();
   stream_executor::StreamPriority stream_priority =
@@ -431,7 +443,7 @@ absl::Status ExecuteThunks(
 
   ResourceRequests resource_requests;
 
-  {  // Collect resource requirements from thunks.
+  if (!mock_collectives) {  // Collect resource requirements from thunks.
     Thunk::PrepareParams prepare_params{&collective_params};
 
     tsl::profiler::TraceMe trace([&] { return "Thunks::Prepare"; });
@@ -476,6 +488,12 @@ absl::Status ExecuteThunks(
       std::move(additional_execution_streams));
 
   for (const std::unique_ptr<Thunk>& thunk : thunk_sequence) {
+    if (thunk->IsCollective() && mock_collectives) {
+      VLOG(1) << "Skipping thunk " << thunk->kind()
+              << " as collectives are mocked";
+      continue;
+    }
+
     // Annotate execution of this op if tracing was enabled when we started
     // running this module.  If tracing is enabled *while* we're running the
     // module, we won't get any data, but that's probably an OK trade-off.
@@ -1000,8 +1018,22 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
     buffers_in_result.insert(result_buffer);
   }
 
-  TF_RETURN_IF_ERROR(ExecuteThunksOrXlaRuntime(run_options, buffer_allocations,
-                                               block_host_until_done));
+  {
+    TF_RETURN_IF_ERROR(
+        CheckCompatibilityWithServiceExecutableRunOptions(run_options));
+
+    ScopedAnnotation annotation([&] { return module_annotations_.top_level; });
+    ScopedModuleAnnotations module_annotations(&module_annotations_);
+
+    ModuleIdentifier unique_id = has_module() ? module().unique_id() : -1;
+    Thunk::ExecutableSource executable_source = {text_, binary_,
+                                                 dnn_compiled_graphs_};
+
+    TF_RETURN_IF_ERROR(ExecuteThunks(
+        has_module() ? &module_config().debug_options() : nullptr, module_name_,
+        unique_id, *thunks_, executable_source, run_options, buffer_allocations,
+        block_host_until_done, execution_stream_ids_, module_annotations_));
+  }
 
   TF_RETURN_IF_ERROR(
       buffer_allocations.TearDown(buffers_in_result, GetAllocations()));
@@ -1011,45 +1043,6 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
     MarkToBeReleasedArguments(*args, result);
   }
   return std::move(result);
-}
-
-absl::Status GpuExecutable::ExecuteThunksOrXlaRuntime(
-    const ServiceExecutableRunOptions* run_options,
-    const BufferAllocations& buffer_allocations, bool block_host_until_done) {
-  TF_RETURN_IF_ERROR(
-      CheckCompatibilityWithServiceExecutableRunOptions(run_options));
-
-  ScopedAnnotation annotation([&] { return module_annotations_.top_level; });
-  ScopedModuleAnnotations module_annotations(&module_annotations_);
-
-  ModuleIdentifier unique_id = has_module() ? module().unique_id() : -1;
-
-  if (thunks_) {
-    Thunk::ExecutableSource executable_source = {text_, binary_,
-                                                 dnn_compiled_graphs_};
-    int64_t collective_max_nchannels =
-        has_module() ? module_config()
-                           .debug_options()
-                           .xla_gpu_nccl_collective_max_nchannels()
-                     : 0;
-    int64_t p2p_max_nchannels =
-        has_module()
-            ? module_config().debug_options().xla_gpu_nccl_p2p_max_nchannels()
-            : 0;
-
-    return ExecuteThunks(
-        module_name_, unique_id, *thunks_, executable_source, run_options,
-        buffer_allocations, block_host_until_done,
-        /*use_highest_priority_for_async_stream*/
-        has_module() ? module_config()
-                           .debug_options()
-                           .xla_gpu_enable_highest_priority_async_stream()
-                     : false,
-        execution_stream_ids_, collective_max_nchannels, p2p_max_nchannels,
-        module_annotations_);
-  }
-
-  return FailedPrecondition("Expected XLA gpu executable is not supplied.");
 }
 
 int64_t GpuExecutable::SizeOfGeneratedCodeInBytes() const {
