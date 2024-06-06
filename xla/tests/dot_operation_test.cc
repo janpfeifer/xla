@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -357,6 +358,13 @@ void ParametricDotTest::ComputeAndCompareR2WithError<int32_t>(
   ComputeAndCompareR2(builder, expected, arguments);
 }
 
+template <>
+void ParametricDotTest::ComputeAndCompareR2WithError<uint8_t>(
+    XlaBuilder* builder, const Array2D<uint8_t>& expected,
+    absl::Span<GlobalData* const> arguments) {
+  ComputeAndCompareR2(builder, expected, arguments);
+}
+
 template <typename NativeT>
 void ParametricDotTest::TestImpl() {
   DotTestParam param = GetParam();
@@ -479,6 +487,16 @@ XLA_TEST_P(ParametricDotTest, TestC64) { TestImpl<std::complex<float>>(); }
 XLA_TEST_P(ParametricDotTest, TestC128) { TestImpl<std::complex<double>>(); }
 #endif
 XLA_TEST_P(ParametricDotTest, TestS32) { TestImpl<int32_t>(); }
+
+// TODO(b/345294078): Remove this ifdef once the bug is fixed.
+#ifdef XLA_BACKEND_SUPPORTS_U8
+XLA_TEST_P(ParametricDotTest, TESTU8) { TestImpl<uint8_t>(); }
+#endif  // XLA_BACKEND_SUPPORTS_U8
+
+#ifdef XLA_BACKEND_SUPPORTS_F8
+XLA_TEST_P(ParametricDotTest, TestF8E5M2) { TestImpl<tsl::float8_e5m2>(); }
+XLA_TEST_P(ParametricDotTest, TestF8E4M3FN) { TestImpl<tsl::float8_e4m3fn>(); }
+#endif  // XLA_BACKEND_SUPPORTS_F8
 
 INSTANTIATE_TEST_CASE_P(DotTests, ParametricDotTest,
                         ::testing::ValuesIn(CreateDotTestParameters()),
