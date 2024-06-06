@@ -107,6 +107,10 @@ extern const char* const kEigenConv3DF32SymbolName =
 extern const char* const kDuccFftSymbolName = "__xla_cpu_runtime_DuccFft";
 extern const char* const kDuccSingleThreadedFftSymbolName =
     "__xla_cpu_runtime_DuccSingleThreadedFft";
+extern const char* const kEigenSingleThreadedMatMulF8E4M3FNSymbolName =
+    "__xla_cpu_runtime_EigenSingleThreadedMatMulF8E4M3FN";
+extern const char* const kEigenSingleThreadedMatMulF8E5M2SymbolName =
+    "__xla_cpu_runtime_EigenSingleThreadedMatMulF8E5M2";
 extern const char* const kEigenSingleThreadedMatMulF16SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedMatMulF16";
 extern const char* const kEigenSingleThreadedMatMulF32SymbolName =
@@ -119,6 +123,8 @@ extern const char* const kEigenSingleThreadedMatMulC128SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedMatMulC128";
 extern const char* const kEigenSingleThreadedMatMulS32SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedMatMulS32";
+extern const char* const kEigenSingleThreadedMatMulU8SymbolName =
+    "__xla_cpu_runtime_EigenSingleThreadedMatMulU8";
 extern const char* const kEigenSingleThreadedConv2DF16SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedConv2DF16";
 extern const char* const kEigenSingleThreadedConv2DF32SymbolName =

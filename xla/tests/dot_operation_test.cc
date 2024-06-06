@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -357,12 +358,19 @@ void ParametricDotTest::ComputeAndCompareR2WithError<int32_t>(
   ComputeAndCompareR2(builder, expected, arguments);
 }
 
+template <>
+void ParametricDotTest::ComputeAndCompareR2WithError<uint8_t>(
+    XlaBuilder* builder, const Array2D<uint8_t>& expected,
+    absl::Span<GlobalData* const> arguments) {
+  ComputeAndCompareR2(builder, expected, arguments);
+}
+
 template <typename NativeT>
 void ParametricDotTest::TestImpl() {
   DotTestParam param = GetParam();
 
   std::unique_ptr<Array2D<NativeT>> dot_lhs_data =
-      MakeLinspaceArray2D<NativeT>(0.0, 1.0, param.m, param.k);
+      MakeLinspaceArray2D<NativeT>(0.02, 0.03, param.m, param.k);
   Literal dot_lhs_lit = LiteralUtil::CreateR2FromArray2DWithLayout(
       *dot_lhs_data, LayoutUtil::MakeLayout(
                          MinorToMajorForIsRowMajor(param.dot_lhs_row_major)));
@@ -370,7 +378,7 @@ void ParametricDotTest::TestImpl() {
       client_->TransferToServer(dot_lhs_lit).value();
 
   std::unique_ptr<Array2D<NativeT>> dot_rhs_data =
-      MakeLinspaceArray2D<NativeT>(0.0, 1.0, param.k, param.n);
+      MakeLinspaceArray2D<NativeT>(-0.01, -0.02, param.k, param.n);
   Layout rhs_layout = LayoutUtil::MakeLayout(
       MinorToMajorForIsRowMajor(param.dot_rhs_row_major));
   Literal dot_rhs_lit =
@@ -383,7 +391,7 @@ void ParametricDotTest::TestImpl() {
   std::unique_ptr<GlobalData> addend_handle;
 
   if (param.has_addend) {
-    addend_data = MakeLinspaceArray2D<NativeT>(0.0, 1.0, param.m, param.n);
+    addend_data = MakeLinspaceArray2D<NativeT>(0.01, 0.02, param.m, param.n);
     addend_lit = LiteralUtil::CreateR2FromArray2DWithLayout(
         *addend_data, LayoutUtil::MakeLayout(
                           MinorToMajorForIsRowMajor(param.addend_row_major)));
@@ -479,6 +487,16 @@ XLA_TEST_P(ParametricDotTest, TestC64) { TestImpl<std::complex<float>>(); }
 XLA_TEST_P(ParametricDotTest, TestC128) { TestImpl<std::complex<double>>(); }
 #endif
 XLA_TEST_P(ParametricDotTest, TestS32) { TestImpl<int32_t>(); }
+
+// TODO(b/345294078): Remove this ifdef once the bug is fixed.
+#ifdef XLA_BACKEND_SUPPORTS_U8
+XLA_TEST_P(ParametricDotTest, TESTU8) { TestImpl<uint8_t>(); }
+#endif  // XLA_BACKEND_SUPPORTS_U8
+
+#ifdef XLA_BACKEND_SUPPORTS_F8
+XLA_TEST_P(ParametricDotTest, TestF8E5M2) { TestImpl<tsl::float8_e5m2>(); }
+XLA_TEST_P(ParametricDotTest, TestF8E4M3FN) { TestImpl<tsl::float8_e4m3fn>(); }
+#endif  // XLA_BACKEND_SUPPORTS_F8
 
 INSTANTIATE_TEST_CASE_P(DotTests, ParametricDotTest,
                         ::testing::ValuesIn(CreateDotTestParameters()),
