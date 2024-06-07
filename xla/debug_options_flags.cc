@@ -259,6 +259,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
 
   opts.set_xla_use_shardonnay(false);
 
+  opts.set_xla_gpu_per_fusion_autotune_cache_dir("");
+
   return opts;
 }
 
@@ -1706,6 +1708,19 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       "xla_use_shardonnay",
       bool_setter_for(&DebugOptions::set_xla_use_shardonnay),
       debug_options->xla_use_shardonnay(), "Whether to use Shardonnay."));
+  flag_list->push_back(
+      tsl::Flag("xla_gpu_per_fusion_autotune_cache_dir",
+                string_setter_for(
+                    &DebugOptions::set_xla_gpu_per_fusion_autotune_cache_dir),
+                debug_options->xla_gpu_per_fusion_autotune_cache_dir(),
+                "Experimental: Maintain a per-fusion autotune cache in the "
+                "given directory. The directory must exist. Cache invalidation "
+                "has to be handled by the "
+                "user (e.g. please use an empty directory if you want to start "
+                "with an empty cache). XLA version checks must be done by the "
+                "user (e.g. if you want to use separate caches for different "
+                "versions of XLA, please use different directories)."
+                "Default: no cache."));
 }  // NOLINT(readability/fn_size)
 
 // Allocates flag_values and flag_objects; this function must not be called more

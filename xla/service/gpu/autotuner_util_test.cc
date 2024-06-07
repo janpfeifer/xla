@@ -22,6 +22,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "xla/autotune_results.pb.h"
@@ -80,6 +81,11 @@ results {
     }
   }
 })";
+
+  void SetUp() override {
+    AutotunerUtil::SetPerFusionAutotuneCacheDir("");
+    AutotunerUtil::ClearAutotuneResults();
+  }
 
   std::string GetUniqueTempFilePath(absl::string_view suffix) {
     std::string filename = TempDir();
@@ -235,6 +241,35 @@ TEST_F(AutotunerUtilTest, OkIfJitAutotuningDisabledButAlreadyLoadedAOT) {
                  return AutotuneResult();
                }).status());
 }
+
+TEST_F(AutotunerUtilTest, SetsAndGetsThePerFusionAutotuneCacheDir) {
+  constexpr absl::string_view kCacheDir = "/asd/fgh/cache";
+  EXPECT_EQ(AutotunerUtil::GetPerFusionAutotuneCacheDir(), "");
+
+  AutotunerUtil::SetPerFusionAutotuneCacheDir(kCacheDir);
+
+  EXPECT_EQ(AutotunerUtil::GetPerFusionAutotuneCacheDir(), kCacheDir);
+}
+
+TEST_F(AutotunerUtilTest, WritesResultsToThePerFusionAutotuneCacheDir) {
+  tsl::Env* default_env = tsl::Env::Default();
+  std::string cache_dir;
+  ASSERT_TRUE(default_env->LocalTempFilename(&cache_dir));
+  ASSERT_OK(default_env->CreateDir(cache_dir));
+  std::vector<std::string> files_in_cache;
+  TF_ASSERT_OK(default_env->GetChildren(cache_dir, &files_in_cache));
+  EXPECT_THAT(files_in_cache, IsEmpty());
+
+  AutotunerUtil::SetPerFusionAutotuneCacheDir(cache_dir);
+  TF_EXPECT_OK(PopulateResultCache());
+
+  files_in_cache.clear();
+  TF_ASSERT_OK(default_env->GetChildren(cache_dir, &files_in_cache));
+  EXPECT_THAT(files_in_cache, Not(IsEmpty()));
+}
+
+// TODO(tdanyluk): More test for the file based per-fusion cache. It will need a
+// change to how we build the test, so I'd like to do it separately.
 
 }  // namespace
 }  // namespace gpu

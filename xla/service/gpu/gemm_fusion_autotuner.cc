@@ -244,7 +244,8 @@ class GemmConfigSetCollector : public ConstDfsHloVisitorWithDefault {
       ++(iterator->second);
     }
 
-    if (AutotunerUtil::IsInCache(key) || handled_fusions_.contains(key)) {
+    TF_ASSIGN_OR_RETURN(bool is_in_cache, AutotunerUtil::IsInCache(key));
+    if (is_in_cache || handled_fusions_.contains(key)) {
       return absl::OkStatus();
     }
 
@@ -1087,7 +1088,9 @@ absl::Status GemmFusionAutotunerImpl::Autotune(
     }
 
     const AutotuneCacheKey key = AutotunerUtil::GetKey(fusion, config_);
-    if (!AutotunerUtil::AddResult(key, std::move(best))) {
+    TF_ASSIGN_OR_RETURN(bool added,
+                        AutotunerUtil::AddResult(key, std::move(best)));
+    if (!added) {
       // In the context of model server, concurrent autotuning is expected and
       // insertion of identical autotuning keys is accepted.
       LOG(WARNING) << "AutotunerUtil::AddResult already existed: "
@@ -1140,7 +1143,7 @@ absl::StatusOr<bool> GemmFusionAutotuner::Run(
       AutotuneResult res = FromConfig(tilings[0]);
       *res.mutable_run_time() =
           tsl::proto_utils::ToDurationProto(absl::ZeroDuration());
-      AutotunerUtil::AddResult(key, res);
+      TF_RETURN_IF_ERROR(AutotunerUtil::AddResult(key, res).status());
     }
   } else if (!debug_options.xla_gpu_override_gemm_autotuner().empty()) {
     // TODO(gflegar): support overriding with non-Triton configs (cuBLAS, cuDNN)
@@ -1155,7 +1158,7 @@ absl::StatusOr<bool> GemmFusionAutotuner::Run(
       *res.mutable_triton() = gemm_key;
       *res.mutable_run_time() =
           tsl::proto_utils::ToDurationProto(absl::ZeroDuration());
-      AutotunerUtil::AddResult(key, res);
+      TF_RETURN_IF_ERROR(AutotunerUtil::AddResult(key, res).status());
     }
   } else if (!config_.IsDeviceless()) {
     TF_ASSIGN_OR_RETURN(std::optional<AutotunerCompileUtil> opt_compile_util,

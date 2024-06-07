@@ -20,6 +20,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -205,14 +206,15 @@ struct AutotunerUtil {
   // Checks if the key is in the autotune cache.
   //
   // Normally, we don't have to use this low level method.
-  static bool IsInCache(const AutotuneCacheKey& key);
+  static absl::StatusOr<bool> IsInCache(const AutotuneCacheKey& key);
 
   // Adds the result to the autotune cache.
   //
   // Returns true if the entry is inserted.
   //
   // Normally, we don't have to use this low level method.
-  static bool AddResult(const AutotuneCacheKey& key, AutotuneResult result);
+  static absl::StatusOr<bool> AddResult(const AutotuneCacheKey& key,
+                                        AutotuneResult result);
 
   // Creates a RedzoneAllocator from a given config.
   static absl::StatusOr<se::RedzoneAllocator> CreateRedzoneAllocator(
@@ -285,9 +287,23 @@ struct AutotunerUtil {
   // format.
   static absl::Status LoadAutotuneResultsFromFile(absl::string_view file_path);
 
+  // Warning: This only clears the in-memory cache.
+  // If you use a file based cache (as per SetPerFusionAutotuneCacheDir),
+  // you're responsible for clearing the cache directory when you want to.
   static void ClearAutotuneResults();
 
+  // Warning: This only checks the in-memory cache.
+  // If you use a file based cache (as per SetPerFusionAutotuneCacheDir), you're
+  // responsible for checking whether the cache directory is empty.
   static bool ResultCacheIsEmpty();
+
+  // Enables file based caching if `new_autotune_cache_dir` is not empty,
+  // disables it otherwise.
+  static void SetPerFusionAutotuneCacheDir(
+      std::string_view new_autotune_cache_dir);
+
+  // Empty filename means no file based caching.
+  static std::string GetPerFusionAutotuneCacheDir();
 };
 
 }  // namespace gpu
