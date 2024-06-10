@@ -33,6 +33,7 @@ limitations under the License.
 #include "xla/service/cpu/runtime/call_thunk.h"
 #include "xla/service/cpu/runtime/conditional_thunk.h"
 #include "xla/service/cpu/runtime/copy_thunk.h"
+#include "xla/service/cpu/runtime/fft_thunk.h"
 #include "xla/service/cpu/runtime/infeed_thunk.h"
 #include "xla/service/cpu/runtime/kernel_thunk.h"
 #include "xla/service/cpu/runtime/outfeed_thunk.h"
@@ -216,6 +217,9 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitHloInstruction(
     case HloOpcode::kCopy:
       return EmitCopyThunk(instruction);
 
+    case HloOpcode::kFft:
+      return EmitFftThunk(instruction);
+
     default:
       return absl::UnimplementedError(
           absl::StrCat("HLO opcode `", HloOpcodeString(instruction->opcode()),
@@ -362,6 +366,29 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitWhileThunk(
   return ThunkSequence::Of<WhileThunk>(ThunkInfo(instruction), cond_buffer,
                                        std::move(cond_thunk),
                                        std::move(body_thunk));
+}
+
+absl::StatusOr<ThunkSequence> ThunkEmitter::EmitFftThunk(
+    const HloInstruction* instruction) {
+  // TODO(heinsaar): Uncomment the below check for supported element types once
+  // ThunkEmitter::ElementTypesSameAndSupported() is available (similar to how
+  // it's done in IrEmitter):
+  //  TF_RETURN_IF_ERROR(ElementTypesSameAndSupported(
+  //      /*instruction=*/*instruction, /*operands=*/{instruction->operands()},
+  //      /*supported_types=*/{F32, F64, C64, C128}));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice arg_slice,
+                      GetAllocationSlice(instruction->operand(0)));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice dest_slice,
+                      GetAllocationSlice(instruction));
+  return ThunkSequence::Of<FftThunk>(
+      ThunkInfo(instruction),              // info
+      hlo_module_config_.debug_options(),  // debug_options
+      instruction->fft_type(),             // fft_type
+      instruction->fft_length(),           // fft_length
+      arg_slice,                           // input_buffer
+      dest_slice,                          // output_buffer
+      instruction->operand(0)->shape(),    // input_shape
+      instruction->shape());               // output_shape
 }
 
 absl::StatusOr<ThunkEmitter::HostKernelAllocationSlices>
