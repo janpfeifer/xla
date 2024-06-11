@@ -1066,21 +1066,6 @@ message TransferFromOutfeedResponse {
   LiteralProto literal = 1;
 }
 
-message ResetDeviceRequest {
-  DeviceHandle device_handle = 1;
-}
-
-message ResetDeviceResponse {}
-
-message ComputationGraphStatsRequest {
-  HloModuleProto computation = 1;
-  DebugOptions debug_options = 2;
-}
-
-message ComputationStatsResponse {
-  ComputationStats stats = 1;
-}
-
 message CreateChannelHandleRequest {
   ChannelHandle.ChannelType channel_type = 1;
 }

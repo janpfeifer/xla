@@ -26,7 +26,7 @@ limitations under the License.
 #include "xla/client/xla_computation.h"
 #include "xla/literal.h"
 #include "xla/service/hlo.pb.h"
-#include "xla/service_interface.h"
+#include "xla/service/service.h"
 #include "xla/statusor.h"
 #include "xla/types.h"
 #include "xla/xla.pb.h"
@@ -38,7 +38,7 @@ namespace xla {
 // lifetime-oriented methods.
 class Client {
  public:
-  explicit Client(ServiceInterface* stub);
+  explicit Client(Service* stub);
   virtual ~Client();
 
   // Compile the computation with the given argument shapes and returns the
@@ -202,11 +202,6 @@ class Client {
   absl::StatusOr<std::vector<std::unique_ptr<GlobalData>>> DeconstructTuple(
       const GlobalData& data);
 
-  // Retrieves the statistics of the given computation.
-  absl::StatusOr<ComputationStats> GetComputationStats(
-      const XlaComputation& computation,
-      const DebugOptions& debug_options) const;
-
   // Returns the Shape of the given array specified by 'data'. The shape
   // includes the Layout of the array as it is stored on the service.
   absl::StatusOr<Shape> GetShape(const GlobalData& data);
@@ -227,18 +222,13 @@ class Client {
 
   absl::StatusOr<XlaComputation> LoadSnapshot(const HloSnapshot& module);
 
-  ServiceInterface* stub() { return stub_; }
+  Service* stub() { return stub_; }
 
  private:
-  // Returns the execution statistics (e.g., gflop/s) as a string from the
-  // ExecutionProfile returned from an execution of the computation.
-  absl::StatusOr<std::string> ExecutionStatsAsString(
-      const XlaComputation& computation, const ExecutionProfile& profile);
-
   absl::StatusOr<ChannelHandle> CreateChannelHandleByType(
       ChannelHandle::ChannelType type);
 
-  ServiceInterface* stub_;  // Stub that this client is connected on.
+  Service* stub_;  // Stub that this client is connected on.
 
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
