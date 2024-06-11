@@ -202,6 +202,9 @@ struct AutoShardingOption {
   // once it is fully implemented.
   bool generate_windowed_einsum_strategies = false;
 
+  // Split constant expressions as well when invoking HloConstantSplitter.
+  bool enable_expression_constant_splitter = false;
+
   // Prints a debug string.
   std::string ToString() const;
 

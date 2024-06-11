@@ -2373,5 +2373,46 @@ absl::StatusOr<int64_t> GetPartialReduceReductionDim(
   return parsed_json[kReductionDimKey].asInt64();
 }
 
+bool OpEncountersShardToFull(const HloInstruction* op) {
+  std::queue<const HloInstruction*> queue;
+  queue.push(op);
+
+  absl::flat_hash_set<const HloInstruction*> visited;
+  while (!queue.empty()) {
+    const HloInstruction* instruction = queue.front();
+    queue.pop();
+    if (visited.contains(instruction)) {
+      continue;
+    }
+    visited.insert(instruction);
+
+    for (const HloComputation* computation :
+         instruction->called_computations()) {
+      for (const HloInstruction* parameter :
+           computation->parameter_instructions()) {
+        if (spmd::IsSPMDShardToFullShapeCustomCall(parameter)) {
+          return true;
+        } else if (spmd::IsSPMDFullToShardShapeCustomCall(parameter) ||
+                   parameter == instruction || visited.contains(parameter)) {
+          continue;
+        }
+        queue.push(parameter);
+      }
+    }
+
+    for (const HloInstruction* user : instruction->users()) {
+      if (spmd::IsSPMDShardToFullShapeCustomCall(user)) {
+        return true;
+      } else if (spmd::IsSPMDFullToShardShapeCustomCall(user) ||
+                 visited.contains(user)) {
+        continue;
+      }
+      queue.push(user);
+    }
+  }
+
+  return false;
+}
+
 }  // namespace spmd
 }  // namespace xla
