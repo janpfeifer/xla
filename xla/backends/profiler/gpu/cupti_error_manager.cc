@@ -87,8 +87,12 @@ CUptiResult CuptiErrorManager::ActivityGetNextRecord(
   IGNORE_CALL_IF_DISABLED;
   CUptiResult error = interface_->ActivityGetNextRecord(
       buffer, valid_buffer_size_bytes, record);
-  ALLOW_ERROR(error, CUPTI_ERROR_MAX_LIMIT_REACHED);
-  LOG_AND_DISABLE_IF_ERROR(error);
+  // When disabling profiling, force activity buffer to flush all will make the
+  // buffer in some kind uncertain state, so we don't disable cupti here.
+  // Also we double checked that all the error for this call are ignored
+  // reasonably considering the above reason.
+  // ALLOW_ERROR(error, CUPTI_ERROR_MAX_LIMIT_REACHED);
+  // LOG_AND_DISABLE_IF_ERROR(error);
   return error;
 }
 

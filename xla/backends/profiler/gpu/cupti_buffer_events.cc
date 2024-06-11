@@ -482,16 +482,16 @@ CuptiActivityBufferManager::ActivityBufferAndSize::ActivityBufferAndSize(
              }),
       size(sz) {}
 
-void CuptiActivityBufferManager::AddCachedActivityEventsTo(
+void AddActivityBufferListEventsTo(
     CuptiEventCollectorDelegate &collector,
-    const size_t max_activity_event_count,
-    size_t &dropped_activity_event_count) {
+    std::list<CuptiActivityBufferManager::ActivityBufferAndSize> &buffer_list,
+    size_t max_activity_event_count, size_t &dropped_activity_event_count) {
   dropped_activity_event_count = 0;
   size_t total_activity_event_count = 0;
-  tsl::mutex_lock lock(buffer_mutex_);
-  while (!cached_buffers_.empty()) {
-    ActivityBufferAndSize buffer_and_size(std::move(cached_buffers_.front()));
-    cached_buffers_.pop_front();
+  while (!buffer_list.empty()) {
+    CuptiActivityBufferManager::ActivityBufferAndSize buffer_and_size(
+        std::move(buffer_list.front()));
+    buffer_list.pop_front();
     ConvertActivityBuffer(collector, buffer_and_size.buffer.get(),
                           buffer_and_size.size, max_activity_event_count,
                           total_activity_event_count,

@@ -83,6 +83,11 @@ class CuptiTracer {
   void Enable(const CuptiTracerOptions& option, CuptiTraceCollector* collector);
   void Disable();
 
+  // Control threads could periodically call this function to flush the
+  // collected events to the collector. Note that this function will lock the
+  // per-thread data mutex and may impact the performance.
+  absl::Status FlushEventsToCollector();
+
   absl::Status HandleCallback(CUpti_CallbackDomain domain,
                               CUpti_CallbackId cbid,
                               const CUpti_CallbackData* callback_info);
@@ -138,8 +143,8 @@ class CuptiTracer {
   void PrepareCallbackStart();
 
   // Gather all per-thread callback events and annotations.
-  std::vector<CallbackAnnotationsAndEvents>
-  GatherCallbackAnnotationsAndEvents();
+  std::vector<CallbackAnnotationsAndEvents> GatherCallbackAnnotationsAndEvents(
+      bool stop_recording);
 
   absl::Status EnableApiTracing();
   absl::Status EnableActivityTracing();

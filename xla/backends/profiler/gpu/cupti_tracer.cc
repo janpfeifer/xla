@@ -768,13 +768,12 @@ absl::Status AddDriverApiCallbackEvent(
   }
 
   // Thread under tracing try the lock, most of the time, it should get it
-  // immediately. Once it found the lock is occupied by others, it could treat
-  // the tracing could be stopped, just ignore adding more event.
+  // immediately. Except user periodically call FlushEventsToCollector().
+  // Or when tracing is stopped, but worker threads are still
+  // injecting events.
   auto &guarded_annotations_and_events =
       PerThreadCallbackAnnotationsAndEvents::Get();
-  tsl::mutex_lock lock(guarded_annotations_and_events.mu_,
-                       std::try_to_lock_t());
-  if (!(bool)lock) return absl::OkStatus();
+  tsl::mutex_lock lock(guarded_annotations_and_events.mu_);
   auto &annotations_and_events =
       guarded_annotations_and_events.annotations_and_events_;
 
@@ -962,10 +961,21 @@ void CuptiTracer::Disable() {
   Finalize().IgnoreError();
   cupti_driver_api_hook_->SyncAndFlush().IgnoreError();
 
+  collector_->SetTracingEndTimeNs(GetTimestamp());
+
+  // The callback API events must be processed before activity API buffers
+  // because the AnnotationMap is populated from the callback API events and
+  // queried by the activity API events.
   collector_->OnTracerCollectedCallbackData(
-      GatherCallbackAnnotationsAndEvents(),
+      GatherCallbackAnnotationsAndEvents(/*stop_recording=*/true),
       option_.has_value() ? option_->required_callback_api_events : false);
-  collector_->OnTracerCachedActivityBuffers(std::move(activity_buffers_));
+
+  if (activity_buffers_) {
+    auto cached_buffers = activity_buffers_->PopCachedBuffers();
+    activity_buffers_.reset();
+    collector_->OnTracerCachedActivityBuffers(std::move(cached_buffers));
+  }
+
   if (cupti_dropped_activity_event_count_ > 0) {
     collector_->OnEventsDropped("Activity Event dropped by Cupti Lib:",
                                 cupti_dropped_activity_event_count_);
@@ -980,6 +990,29 @@ void CuptiTracer::Disable() {
   option_.reset();
   cupti_driver_api_hook_.reset();
   tsl::profiler::AnnotationStack::Enable(false);
+}
+
+absl::Status CuptiTracer::FlushEventsToCollector() {
+  if (!api_tracing_enabled_ && !activity_tracing_enabled_)
+    return absl::OkStatus();
+
+  if (activity_tracing_enabled_) {
+    VLOG(1) << "Flushing CUPTI activity buffers for FlushEventsToCollector";
+    // Normal flush is used to flush completed activity buffers.
+    RETURN_IF_CUPTI_ERROR(cupti_interface_->ActivityFlushAll(0));
+    VLOG(1) << "CUPTI activity buffer flushed for FlushEventsToCollector";
+  }
+
+  if (api_tracing_enabled_) {
+    collector_->OnTracerCollectedCallbackData(
+        GatherCallbackAnnotationsAndEvents(/*stop_recording=*/false),
+        option_.has_value() ? option_->required_callback_api_events : false);
+  }
+  if (activity_tracing_enabled_) {
+    auto cached_buffers = activity_buffers_->PopCachedBuffers();
+    collector_->OnTracerCachedActivityBuffers(std::move(cached_buffers));
+  }
+  return absl::OkStatus();
 }
 
 absl::Status CuptiTracer::EnableApiTracing() {
@@ -1286,9 +1319,12 @@ absl::Status CuptiTracer::ProcessActivityBuffer(CUcontext context,
 }
 
 std::vector<CallbackAnnotationsAndEvents>
-CuptiTracer::GatherCallbackAnnotationsAndEvents() {
+CuptiTracer::GatherCallbackAnnotationsAndEvents(bool stop_recording) {
+  // Note that it is OK to call PerThread<T>'s StartRecording() after
+  // StartRecording() is called.
   auto guarded_collection =
-      PerThreadCallbackAnnotationsAndEvents::StopRecording();
+      stop_recording ? PerThreadCallbackAnnotationsAndEvents::StopRecording()
+                     : PerThreadCallbackAnnotationsAndEvents::StartRecording();
   VLOG(3) << "Total grabbed per thread annotated events buffer: "
           << guarded_collection.size();
 
