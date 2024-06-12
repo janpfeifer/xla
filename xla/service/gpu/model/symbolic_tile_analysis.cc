@@ -30,11 +30,15 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
+#include "absl/numeric/bits.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
 #include "mlir/IR/AffineExpr.h"  // from @llvm-project
 #include "mlir/IR/AffineMap.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
@@ -51,6 +55,8 @@ limitations under the License.
 #include "xla/service/gpu/model/tiled_hlo_instruction.h"
 #include "xla/service/instruction_fusion.h"
 #include "xla/service/name_uniquer.h"
+#include "xla/shape.h"
+#include "xla/status_macros.h"
 #include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
 
@@ -61,6 +67,7 @@ namespace {
 
 using ::mlir::AffineExpr;
 using ::mlir::MLIRContext;
+using ConstraintMap = SymbolicTile::ConstraintMap;
 
 // Computes indexing map from program id into the tile offset for the given
 // shape and tile sizes.
@@ -162,6 +169,8 @@ absl::StatusOr<IndexingMap> ComputeBlockIdToTileOffsetIndexing(
       const HloInstructionAdaptor&, IndexingMap)>
       get_tiled_hlo_instruction;
 
+  std::optional<ConstraintMap> constraints = ConstraintMap();
+
   // Create a new tiled hlo instruction or return existing instruction from
   // cache for the given hlo and indexing map.
   get_tiled_hlo_instruction =
@@ -180,8 +189,6 @@ absl::StatusOr<IndexingMap> ComputeBlockIdToTileOffsetIndexing(
     // line. This is not an inherent limitation of the approach, but simply
     // issues to be resolved in the current implementation.
     if (hlo->opcode() == HloOpcode::kDot ||
-        hlo->opcode() == HloOpcode::kReshape ||
-        hlo->opcode() == HloOpcode::kBitcast ||
         hlo->opcode() == HloOpcode::kConcatenate) {
       return FusionDecision{} << "Bailing out on " << hlo->ToString();
     }
@@ -197,6 +204,22 @@ absl::StatusOr<IndexingMap> ComputeBlockIdToTileOffsetIndexing(
       return FusionDecision{} << "Failed to compute symbolic tile for "
                               << indexing_map.ToString() << " for HLO "
                               << hlo->ToString();
+    }
+
+    if (!symbolic_tile->is_satisfiable()) {
+      return FusionDecision{} << "Symbolic tile " << symbolic_tile->ToString()
+                              << " is not satisfiable for "
+                              << indexing_map.ToString() << " for HLO "
+                              << hlo->ToString();
+    }
+
+    constraints = MergeConstraintMapIfPresentAndCompatible(
+        std::move(constraints), symbolic_tile->constraints());
+
+    if (!constraints.has_value()) {
+      return FusionDecision{} << "Failed to merge constraints of "
+                              << hlo->ToString() << " in pre-existing "
+                              << "constraint map";
     }
 
     tiled_hlo_instructions.push_back(
@@ -258,12 +281,53 @@ absl::StatusOr<IndexingMap> ComputeBlockIdToTileOffsetIndexing(
     return topological_order.at(i1.get()) < topological_order.at(i2.get());
   });
 
-  return SymbolicTileAnalysis(std::move(tiled_hlo_instructions), ctx);
+  return SymbolicTileAnalysis(std::move(tiled_hlo_instructions),
+                              std::move(*constraints), ctx);
+}
+
+absl::StatusOr<bool> SymbolicTileAnalysis::ParametersSatisfyConstraints(
+    absl::Span<const int64_t> tile_parameters) const {
+  // Populate parameter map.
+  llvm::SmallVector<AffineExpr> parameters = llvm::to_vector(
+      llvm::map_range(tile_parameters, [this](const int64_t v) -> AffineExpr {
+        return mlir::getAffineConstantExpr(v, context_);
+      }));
+
+  for (auto [constrained_expr, interval] : constraints_) {
+    AffineExpr constrained_expr_value =
+        constrained_expr.replaceSymbols(parameters);
+    if (constrained_expr_value.getKind() != mlir::AffineExprKind::Constant) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Failed to reduce ", AffineMapPrinter().ToString(constrained_expr),
+          " to a constant with tile parameters ",
+          absl::StrJoin(tile_parameters, ", ")));
+    }
+
+    int64_t constrained_value =
+        llvm::cast<mlir::AffineConstantExpr>(constrained_expr_value).getValue();
+
+    if (constrained_value < interval.lower ||
+        constrained_value > interval.upper) {
+      return false;
+    }
+  }
+  return true;
 }
 
 absl::StatusOr<TiledHloComputation>
 SymbolicTileAnalysis::ComputeTiledHloInstructions(
-    const std::vector<int64_t>& tile_parameters) const {
+    absl::Span<const int64_t> tile_parameters,
+    bool constraints_are_known_satisfied) const {
+  if (!constraints_are_known_satisfied) {
+    TF_ASSIGN_OR_RETURN(bool constraints_are_satisfied,
+                        ParametersSatisfyConstraints(tile_parameters));
+    if (!constraints_are_satisfied) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Tile parameters ", absl::StrJoin(tile_parameters, ", "),
+          " do not satisfy the SymbolicTileAnalysis's constraints."));
+    }
+  }
+
   IndexingMap block_id_to_root_tile_offset = ComputeBlockIdToOutputTileIndexing(
       GetRoot()->hlo()->shape().dimensions(), tile_parameters, context_);
 
@@ -358,6 +422,107 @@ std::string SymbolicTileAnalysis::ToString(
     ss << tiled_hlo->ToString();
   }
   return ss.str();
+}
+
+namespace {
+
+// The possible tiles sizes for one dimension.
+std::vector<int64_t> PossibleTileSizesForOneDimension(int64_t dim_size) {
+  if (dim_size <= 0) {
+    return {};
+  }
+
+  std::vector<int64_t> result;
+  result.reserve(absl::bit_width(static_cast<uint64_t>(dim_size)));
+  for (int64_t tmp_size = 1; tmp_size < dim_size; tmp_size *= 2) {
+    result.push_back(tmp_size);
+  }
+  if (dim_size >= 1) {
+    result.push_back(dim_size);
+  }
+  return result;
+}
+
+// The state needed by the recursive function CartesianProductImpl.
+struct CartesianProductImplState {
+  const std::vector<std::vector<int64_t>>* tile_sizes_by_axis = nullptr;
+  std::function<bool(absl::Span<const int64_t>)> is_valid;
+  SymbolicTileAnalysis::Tiling tmp_tile_sizes;
+  std::vector<SymbolicTileAnalysis::Tiling> results;
+};
+
+// See CartesianProductWithFilter.
+//
+// This is a typical recursive enumeration function.
+void CartesianProductImpl(CartesianProductImplState& state, const int axis) {
+  if (axis >= state.tile_sizes_by_axis->size()) {
+    if (state.is_valid(state.tmp_tile_sizes)) {
+      state.results.push_back(state.tmp_tile_sizes);
+    }
+    return;
+  }
+  for (int64_t tile_size : state.tile_sizes_by_axis->at(axis)) {
+    state.tmp_tile_sizes.at(axis) = tile_size;
+    CartesianProductImpl(state, axis + 1);
+  }
+}
+
+// Calculates the tilings defined by the cartesian product of the vectors in
+// `tile_sizes_by_axis`, filtered by `is_valid`.
+std::vector<SymbolicTileAnalysis::Tiling> CartesianProductWithFilter(
+    const std::vector<std::vector<int64_t>>& tile_sizes_by_axis,
+    std::function<bool(absl::Span<const int64_t>)> is_valid) {
+  CartesianProductImplState state;
+  state.tile_sizes_by_axis = &tile_sizes_by_axis;
+  state.is_valid = std::move(is_valid);
+  state.tmp_tile_sizes.resize(tile_sizes_by_axis.size());
+  CartesianProductImpl(state, /*axis=*/0);
+  return std::move(state.results);
+}
+
+}  // namespace
+
+std::vector<SymbolicTileAnalysis::Tiling> GetGoodTilings(
+    absl::Span<const int64_t> dim_sizes,
+    std::function<bool(absl::Span<const int64_t>)> is_valid) {
+  CHECK(is_valid != nullptr);
+
+  std::vector<std::vector<int64_t>> tile_sizes_by_axis;
+  tile_sizes_by_axis.reserve(dim_sizes.size());
+  for (int64_t dim_size : dim_sizes) {
+    tile_sizes_by_axis.push_back(PossibleTileSizesForOneDimension(dim_size));
+  }
+
+  return CartesianProductWithFilter(tile_sizes_by_axis, std::move(is_valid));
+}
+
+absl::StatusOr<std::vector<SymbolicTileAnalysis::Tiling>>
+SymbolicTileAnalysis::GetGoodTilings() const {
+  TF_RET_CHECK(!symbolic_tiled_hlo_instructions_.empty());
+  TF_RET_CHECK(symbolic_tiled_hlo_instructions_.back() != nullptr);
+
+  const SymbolicTiledHloInstruction& instr =
+      *symbolic_tiled_hlo_instructions_.back();
+  TF_RET_CHECK(instr.hlo() != nullptr);
+  const Shape& shape = instr.hlo()->shape();
+
+  absl::Status status = absl::OkStatus();
+  std::vector<SymbolicTileAnalysis::Tiling> result = xla::gpu::GetGoodTilings(
+      shape.dimensions(), [&](absl::Span<const int64_t> tile_sizes) -> bool {
+        absl::StatusOr<bool> is_valid =
+            ParametersSatisfyConstraints(tile_sizes);
+        if (!is_valid.ok()) {
+          status = is_valid.status();
+          return false;
+        }
+        return is_valid.value();
+      });
+
+  if (status.ok()) {
+    return result;
+  }
+
+  return status;
 }
 
 }  // namespace gpu

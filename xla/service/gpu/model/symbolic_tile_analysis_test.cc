@@ -20,9 +20,11 @@ limitations under the License.
 #include <optional>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
@@ -42,6 +44,9 @@ namespace {
 using ::testing::ElementsAreArray;
 using ::testing::ExplainMatchResult;
 using ::testing::Matcher;
+using ::testing::SizeIs;
+using ::testing::status::IsOkAndHolds;
+using ::testing::status::StatusIs;
 
 MATCHER_P3(MatchTiledHloInstructionImpl, tile_sizes, tile_strides,
            block_id_to_tile_offsets_indexing, "") {
@@ -336,37 +341,41 @@ ENTRY main {
   p1 = f32[2,3]{1,0} parameter(1)
   ROOT fusion = f32[1,3]{1,0} fusion(p0, p1), kind=kLoop, calls=fusion
 })"));
-  EXPECT_EQ(TryAnalyzeModule(module.get()), std::nullopt);
+  EXPECT_FALSE(TryAnalyzeModule(module.get()).has_value());
 }
 
-TEST_F(SymbolicTileAnalysisTest, BailOutOnUnsupportedReshape) {
+TEST_F(SymbolicTileAnalysisTest, DoesNotBailOutOnConstrainedReshape) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(R"(
 fusion {
-  p0 = f32[1,2]{1,0} parameter(0)
-  ROOT reshape = f32[2] reshape(p0)
+  p0 = f32[4,2]{1,0} parameter(0)
+  ROOT reshape = f32[8] reshape(p0)
 }
 
 ENTRY main {
-  p0 = f32[1,2]{1,0} parameter(0)
-  ROOT fusion = f32[2] fusion(p0), kind=kLoop, calls=fusion
+  p0 = f32[4,2]{1,0} parameter(0)
+  ROOT fusion = f32[8] fusion(p0), kind=kLoop, calls=fusion
 })"));
-  EXPECT_EQ(TryAnalyzeModule(module.get()), std::nullopt);
+  std::optional<SymbolicTileAnalysis> analysis = TryAnalyzeModule(module.get());
+  ASSERT_TRUE(analysis.has_value());
+  EXPECT_THAT(analysis->GetConstraints(), SizeIs(1));
 }
 
-TEST_F(SymbolicTileAnalysisTest, BailOutOnUnsupportedBitcast) {
+TEST_F(SymbolicTileAnalysisTest, DoesNotBailOutOnConstrainedBitcast) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(R"(
 fusion {
-  p0 = f32[1,2]{1,0} parameter(0)
-  ROOT bitcast = f32[2] bitcast(p0)
+  p0 = f32[4,2]{1,0} parameter(0)
+  ROOT bitcast = f32[8] bitcast(p0)
 }
 
 ENTRY main {
-  p0 = f32[1,2]{1,0} parameter(0)
-  ROOT fusion = f32[2] fusion(p0), kind=kLoop, calls=fusion
+  p0 = f32[4,2]{1,0} parameter(0)
+  ROOT fusion = f32[8] fusion(p0), kind=kLoop, calls=fusion
 })"));
-  EXPECT_EQ(TryAnalyzeModule(module.get()), std::nullopt);
+  std::optional<SymbolicTileAnalysis> analysis = TryAnalyzeModule(module.get());
+  ASSERT_TRUE(analysis.has_value());
+  EXPECT_THAT(analysis->GetConstraints(), SizeIs(1));
 }
 
 TEST_F(SymbolicTileAnalysisTest, BailOutOnUnsupportedConcatenate) {
@@ -383,7 +392,7 @@ ENTRY main {
   p1 = f32[1,3]{1,0} parameter(1)
   ROOT fusion = f32[2,3] fusion(p0, p1), kind=kLoop, calls=fusion
 })"));
-  EXPECT_EQ(TryAnalyzeModule(module.get()), std::nullopt);
+  EXPECT_FALSE(TryAnalyzeModule(module.get()).has_value());
 }
 
 TEST_F(SymbolicTileAnalysisTest, MultiOutputFusionIsNotSupported) {
@@ -402,7 +411,221 @@ ENTRY main {
   p1 = f32[32] parameter(1)
   ROOT fusion = (f32[32], f32[32]) fusion(p0, p1), kind=kLoop, calls=fusion
 })"));
-  EXPECT_EQ(TryAnalyzeModule(module.get()), std::nullopt);
+  EXPECT_FALSE(TryAnalyzeModule(module.get()).has_value());
+}
+
+TEST_F(SymbolicTileAnalysisTest, ConstraintSatisfactionIsEvaluatedCorrectly) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+fusion {
+  p0 = f32[1,8,6,4,8]{4,3,2,1,0} parameter(0)
+  ROOT bitcast = f32[48,32]{1,0} bitcast(p0)
+}
+
+ENTRY main {
+  p0 = f32[1,8,6,4,8]{4,3,2,1,0} parameter(0)
+  ROOT fusion = f32[48,32]{1,0} fusion(p0), kind=kLoop, calls=fusion
+})"));
+  std::optional<SymbolicTileAnalysis> analysis = TryAnalyzeModule(module.get());
+  ASSERT_TRUE(analysis.has_value());
+  EXPECT_THAT(analysis->GetConstraints(), SizeIs(2));
+
+  // We expect the constraints here to be
+  //    s0 mod 6 in [0, 0]
+  //    s1 mod 8 in [0, 0]
+  // We expect tile sizes {6, 8} to satisfy these constraints.
+  std::vector<int64_t> possible_tile_parameters({6, 8});
+  EXPECT_THAT(analysis->ParametersSatisfyConstraints(possible_tile_parameters),
+              IsOkAndHolds(true));
+
+  // However, we do not expect tile sizes {6, 7} to satisfy these constraints.
+  std::vector<int64_t> impossible_tile_parameters({6, 7});
+  EXPECT_THAT(
+      analysis->ParametersSatisfyConstraints(impossible_tile_parameters),
+      IsOkAndHolds(false));
+
+  // Passing too few tile parameters results in an error since constraints can
+  // not be properly evaluated.
+  EXPECT_THAT(analysis->ParametersSatisfyConstraints(/*tile_parameters==*/{6}),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+
+  // Passing tile parameters that satisfy the constraints should let us compute
+  // a TiledHloComputation.
+  EXPECT_OK(analysis->ParametersSatisfyConstraints(possible_tile_parameters));
+
+  // Passing tile parameters that do not satisfy the constraints should result
+  // in an error...
+  EXPECT_THAT(analysis->ComputeTiledHloInstructions(impossible_tile_parameters),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+
+  // ... unless we pinky-promise (lie) that they satisfy the constraints ;)
+  EXPECT_OK(analysis->ComputeTiledHloInstructions(
+      impossible_tile_parameters, /*constraints_are_known_satisfied=*/true));
+}
+
+TEST_F(SymbolicTileAnalysisTest, ConstraintsAreAggregatedCorrectly) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+fusion {
+  p0 = f32[1,48,4,8]{3,2,1,0} parameter(0)
+  p1 = f32[1,8,6,32]{3,2,1,0} parameter(1)
+  bitcast_p0 = f32[48,32]{1,0} bitcast(p0)
+  bitcast_p1 = f32[48,32]{1,0} bitcast(p1)
+  ROOT add = f32[48,32]{1,0} add(bitcast_p0, bitcast_p1)
+}
+
+ENTRY main {
+  p0 = f32[1,48,4,8]{3,2,1,0} parameter(0)
+  p1 = f32[1,8,6,32]{3,2,1,0} parameter(1)
+  ROOT fusion = f32[48,32]{1,0} fusion(p0, p1), kind=kLoop, calls=fusion
+})"));
+  std::optional<SymbolicTileAnalysis> analysis = TryAnalyzeModule(module.get());
+  ASSERT_TRUE(analysis.has_value());
+  // Each bitcast in the above module introduces one constraint. Once they are
+  // aggregated, we have two!
+  EXPECT_THAT(analysis->GetConstraints(), SizeIs(2));
+}
+
+TEST_F(SymbolicTileAnalysisTest, BailsOutWhenConstraintsCanNotBeMerged) {
+  // TODO(bchetioui): allow merging a constraint with itself.
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+fusion {
+  p0 = f32[1,48,4,8]{3,2,1,0} parameter(0)
+  p1 = f32[1,48,4,8]{3,2,1,0} parameter(1)
+  bitcast_p0 = f32[48,32]{1,0} bitcast(p0)
+  bitcast_p1 = f32[48,32]{1,0} bitcast(p1)
+  ROOT add = f32[48,32]{1,0} add(bitcast_p0, bitcast_p1)
+}
+
+ENTRY main {
+  p0 = f32[1,48,4,8]{3,2,1,0} parameter(0)
+  p1 = f32[1,48,4,8]{3,2,1,0} parameter(1)
+  ROOT fusion = f32[48,32]{1,0} fusion(p0, p1), kind=kLoop, calls=fusion
+})"));
+  EXPECT_FALSE(TryAnalyzeModule(module.get()).has_value());
+}
+
+struct GetGoodTilingsTest : public ::testing::Test {
+  using TilingVector = std::vector<SymbolicTileAnalysis::Tiling>;
+  static bool ConstantTrue(absl::Span<const int64_t>) { return true; }
+};
+
+TEST_F(GetGoodTilingsTest, ReturnsOneTilingWhenRankIsZero) {
+  EXPECT_EQ(GetGoodTilings({}, ConstantTrue),
+            TilingVector{SymbolicTileAnalysis::Tiling{}});
+}
+
+TEST_F(GetGoodTilingsTest, ReturnsZeroTilingsWhenADimensionIsZeroOrNegative) {
+  EXPECT_EQ(GetGoodTilings({0}, ConstantTrue), TilingVector{});
+  EXPECT_EQ(GetGoodTilings({0, 1}, ConstantTrue), TilingVector{});
+  EXPECT_EQ(GetGoodTilings({1, 0}, ConstantTrue), TilingVector{});
+  EXPECT_EQ(GetGoodTilings({-1}, ConstantTrue), TilingVector{});
+  EXPECT_EQ(GetGoodTilings({-1, 1}, ConstantTrue), TilingVector{});
+  EXPECT_EQ(GetGoodTilings({1, -1}, ConstantTrue), TilingVector{});
+}
+
+TEST_F(GetGoodTilingsTest, ReturnsPowersOfTwoAndTheDimSizeForRankOne) {
+  EXPECT_EQ(GetGoodTilings({1}, ConstantTrue), TilingVector{{1}});
+  EXPECT_EQ(GetGoodTilings({2}, ConstantTrue), TilingVector({{1}, {2}}));
+  EXPECT_EQ(GetGoodTilings({3}, ConstantTrue), TilingVector({{1}, {2}, {3}}));
+  EXPECT_EQ(GetGoodTilings({4}, ConstantTrue), TilingVector({{1}, {2}, {4}}));
+  EXPECT_EQ(GetGoodTilings({5}, ConstantTrue),
+            TilingVector({{1}, {2}, {4}, {5}}));
+  EXPECT_EQ(GetGoodTilings({11}, ConstantTrue),
+            TilingVector({{1}, {2}, {4}, {8}, {11}}));
+}
+
+TEST_F(GetGoodTilingsTest, CreatesCartesianProductForRankTwo) {
+  EXPECT_EQ(GetGoodTilings({3, 4}, ConstantTrue), TilingVector({{1, 1},
+                                                                {1, 2},
+                                                                {1, 4},
+                                                                {2, 1},
+                                                                {2, 2},
+                                                                {2, 4},
+                                                                {3, 1},
+                                                                {3, 2},
+                                                                {3, 4}}));
+}
+
+TEST_F(GetGoodTilingsTest, CreatesCartesianProductForRankThree) {
+  EXPECT_EQ(GetGoodTilings({3, 4, 2}, ConstantTrue), TilingVector({{1, 1, 1},
+                                                                   {1, 1, 2},
+                                                                   {1, 2, 1},
+                                                                   {1, 2, 2},
+                                                                   {1, 4, 1},
+                                                                   {1, 4, 2},
+                                                                   {2, 1, 1},
+                                                                   {2, 1, 2},
+                                                                   {2, 2, 1},
+                                                                   {2, 2, 2},
+                                                                   {2, 4, 1},
+                                                                   {2, 4, 2},
+                                                                   {3, 1, 1},
+                                                                   {3, 1, 2},
+                                                                   {3, 2, 1},
+                                                                   {3, 2, 2},
+                                                                   {3, 4, 1},
+                                                                   {3, 4, 2}}));
+}
+
+TEST_F(GetGoodTilingsTest, FiltersTheTilingsUsingThePredicate) {
+  auto all_even = [](absl::Span<const int64_t> tile_sizes) {
+    for (int64_t tile_size : tile_sizes) {
+      if (tile_size % 2 != 0) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  auto all_equal = [](absl::Span<const int64_t> tile_sizes) {
+    if (tile_sizes.size() < 2) {
+      return true;
+    }
+    int64_t value = tile_sizes.at(0);
+    for (int i = 1; i < tile_sizes.size(); ++i) {
+      if (tile_sizes.at(i) != value) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  EXPECT_EQ(GetGoodTilings({3, 4}, all_even), TilingVector({{2, 2}, {2, 4}}));
+  EXPECT_EQ(GetGoodTilings({3, 3, 3}, all_equal),
+            TilingVector({{1, 1, 1}, {2, 2, 2}, {3, 3, 3}}));
+}
+
+TEST_F(SymbolicTileAnalysisTest,
+       GetGoodTilingsWorksTakingConstraintsIntoAccount) {
+  // The module was chosen (from SymbolicTileTest) because it has a constraint
+  // on the tile sizes.
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+fusion {
+  p0 = f32[1,8,6,4]{3,2,1,0} parameter(0)
+  ROOT bitcast = f32[48,4]{1,0} bitcast(p0)
+}
+
+ENTRY main {
+  p0 = f32[1,8,6,4]{3,2,1,0} parameter(0)
+  ROOT fusion = f32[48,4]{1,0} fusion(p0), kind=kLoop, calls=fusion
+})"));
+
+  std::optional<SymbolicTileAnalysis> opt_analysis =
+      TryAnalyzeModule(module.get());
+  ASSERT_TRUE(opt_analysis.has_value());
+
+  const SymbolicTileAnalysis& analysis = opt_analysis.value();
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<SymbolicTileAnalysis::Tiling> good_tilings,
+      analysis.GetGoodTilings());
+  // The constraint on the 1st dimension is "s0 mod 6 in [0, 0]", and only 48
+  // fulfills that from the set of possible tile sizes (1, 2, 4, 8, 16, 32, 48).
+  // There is no constraint on the 2nd dimension.
+  EXPECT_EQ(good_tilings, std::vector<SymbolicTileAnalysis::Tiling>(
+                              {{48, 1}, {48, 2}, {48, 4}}));
 }
 
 }  // namespace
