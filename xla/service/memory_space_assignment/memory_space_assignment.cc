@@ -349,9 +349,17 @@ MemorySpaceAssignment::RunMemorySpaceAssignment(
         hlo_live_range, allocations_);
     VLOG(1) << "Estimated elapsed time (sec): " << estimated_time;
   }
-
+  for (auto& allocation : allocations_) {
+    VLOG(5) << allocation->ToString();
+  }
   TF_RETURN_IF_ERROR(Process(hlo_live_range));
+  for (auto& allocation : allocations_) {
+    VLOG(5) << allocation->ToString();
+  }
   ScheduleAsynchronousCopies();
+  for (auto& allocation : allocations_) {
+    VLOG(5) << allocation->ToString();
+  }
   TF_RETURN_IF_ERROR(SimplifyGraph());
   TF_RETURN_IF_ERROR(FixSchedule());
   TF_RETURN_IF_ERROR(ExportAndColorBuffers());
@@ -526,6 +534,9 @@ absl::Status MemorySpaceAssignment::ExportAndColorBuffers() {
              defining_position.instruction, defining_position.index)) {
       for (auto& value : buffer->values()) {
         for (auto& position : value->positions()) {
+          VLOG(3) << "Temp: " << defining_position.ToString() << " | "
+                  << buffer->ToString() << " | " << value->ToString() << " | "
+                  << position.ToString();
           VLOG(4) << "Coloring " << position.ToString();
           Shape* shape = ShapeUtil::GetMutableSubshape(
               position.instruction->mutable_shape(), position.index);
