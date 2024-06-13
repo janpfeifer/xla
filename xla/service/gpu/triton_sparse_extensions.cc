@@ -32,13 +32,26 @@ limitations under the License.
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Support/TypeID.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/CommandLine.h"
-#include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+// #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 
 using namespace mlir;  // NOLINT(build/namespaces)
+
+// The functions below are defined in AccelerateMatmul.cpp.
+namespace mlir::triton::gpu {
+SmallVector<unsigned, 3> getWarpsPerTile(
+    Operation *dotOp, ArrayRef<int64_t> shape, int version, int numWarps,
+    const SmallVector<unsigned, 3> &instrShape);
+int computeOrigBitWidth(Value x);
+Value getMMAv3Operand(Value v, PatternRewriter &rewriter, int opIdx);
+}  // namespace mlir::triton::gpu
 
 namespace {
 
@@ -175,6 +188,121 @@ class AddSparseDotEncodingPass
                             llvm::cl::init(1)};
 };
 
+class SparseBlockedToMMA : public RewritePattern {
+  using ConvertLayoutOp = triton::gpu::ConvertLayoutOp;
+  using SparseDotOp = triton::gpu::SparseDotOp;
+  using SparseDotMetaEncodingAttr = triton::gpu::SparseDotMetaEncodingAttr;
+  using NvidiaMmaEncodingAttr = triton::gpu::NvidiaMmaEncodingAttr;
+
+ public:
+  SparseBlockedToMMA(MLIRContext *context, int compute_capability)
+      : RewritePattern(SparseDotOp::getOperationName(), 2, context),
+        compute_capability_(compute_capability) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto dotOp = cast<SparseDotOp>(op);
+    auto ctx = op->getContext();
+    Value a = dotOp.getA();
+    Value b = dotOp.getB();
+
+    // Check data-types and SM compatibility
+    RankedTensorType oldRetType = dotOp.getType();
+    if (!oldRetType.getEncoding() ||
+        isa<NvidiaMmaEncodingAttr>(oldRetType.getEncoding()))
+      return failure();
+
+    assert(compute_capability_ >= 80 &&
+           "SparseDot is supported on Ampere and higher");
+    bool allowV3 = !triton::tools::getBoolEnv("DISABLE_MMA_V3");
+    int versionMajor = compute_capability_ >= 90 && allowV3 ? 3 : 2;
+
+    // get MMA encoding for the given number of warps
+    auto retShapePerCTA = triton::gpu::getShapePerCTA(oldRetType);
+    auto mod = op->getParentOfType<ModuleOp>();
+    int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
+    auto CTALayout = triton::gpu::getCTALayout(oldRetType.getEncoding());
+
+    auto instrShape =
+        mmaVersionToInstrShape(versionMajor, retShapePerCTA,
+                               cast<RankedTensorType>(a.getType()), numWarps);
+    auto warpsPerTile = getWarpsPerTile(dotOp, retShapePerCTA, versionMajor,
+                                        numWarps, instrShape);
+    NvidiaMmaEncodingAttr mmaEnc =
+        NvidiaMmaEncodingAttr::get(ctx, versionMajor, /*versionMinor=*/0,
+                                   warpsPerTile, CTALayout, instrShape);
+    auto newRetType = RankedTensorType::get(
+        oldRetType.getShape(), oldRetType.getElementType(), mmaEnc);
+
+    // convert accumulator
+    auto oldAcc = dotOp.getOperand(2);
+    auto newAcc = rewriter.create<triton::gpu::ConvertLayoutOp>(
+        oldAcc.getLoc(), newRetType, oldAcc);
+
+    if (versionMajor == 2) {
+      int minBitwidth = std::min(triton::gpu::computeOrigBitWidth(a),
+                                 triton::gpu::computeOrigBitWidth(b));
+      int kWidth = 32 / minBitwidth;
+
+      // convert A operand
+      auto oldAType = cast<RankedTensorType>(a.getType());
+      auto newAEncoding = DotOperandEncodingAttr::get(ctx, 0, mmaEnc, kWidth);
+      auto newAType = RankedTensorType::get(
+          oldAType.getShape(), oldAType.getElementType(), newAEncoding);
+      a = rewriter.create<ConvertLayoutOp>(a.getLoc(), newAType, a);
+
+      // convert B operand
+      auto oldBType = cast<RankedTensorType>(b.getType());
+      auto newBEncoding = DotOperandEncodingAttr::get(ctx, 1, mmaEnc, kWidth);
+      auto newBType = RankedTensorType::get(
+          oldBType.getShape(), oldBType.getElementType(), newBEncoding);
+      b = rewriter.create<ConvertLayoutOp>(b.getLoc(), newBType, b);
+    } else {
+      a = triton::gpu::getMMAv3Operand(a, rewriter, 0);
+      b = triton::gpu::getMMAv3Operand(b, rewriter, 1);
+    }
+
+    // convert metadata
+    Value meta = dotOp.getAMeta();
+    auto oldMetaType = cast<RankedTensorType>(meta.getType());
+    auto newMetaType = RankedTensorType::get(
+        oldMetaType.getShape(), oldMetaType.getElementType(),
+        SparseDotMetaEncodingAttr::get(ctx, mmaEnc));
+    meta = rewriter.create<ConvertLayoutOp>(meta.getLoc(), newMetaType, meta);
+
+    // convert dot instruction
+    auto newDot = rewriter.create<SparseDotOp>(dotOp.getLoc(), newRetType, a, b,
+                                               newAcc, meta);
+
+    rewriter.replaceOpWithNewOp<ConvertLayoutOp>(op, oldRetType,
+                                                 newDot.getResult());
+    return success();
+  }
+
+ private:
+  int compute_capability_;
+};
+
+class SparseBlockedToMMAPass
+    : public PassWrapper<SparseBlockedToMMAPass, OperationPass<ModuleOp>> {
+ public:
+  SparseBlockedToMMAPass() = default;
+
+  StringRef getArgument() const override { return "sparse-blocked-to-mma"; }
+
+  void runOnOperation() override {
+    MLIRContext *context = &getContext();
+    ModuleOp module = getOperation();
+    auto compute_capability = getNVIDIAComputeCapability(module);
+    auto pattern =
+        std::make_unique<SparseBlockedToMMA>(context, compute_capability);
+    RewritePatternSet patterns(context, std::move(pattern));
+    if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns)))) {
+      signalPassFailure();
+    }
+  }
+};
+
 }  // namespace
 
 std::unique_ptr<Pass> xla::gpu::createAddSparseDotEncodingPass(
@@ -183,6 +311,11 @@ std::unique_ptr<Pass> xla::gpu::createAddSparseDotEncodingPass(
                                                     num_ctas);
 }
 
+std::unique_ptr<mlir::Pass> xla::gpu::createSparseBlockedToMMAPass() {
+  return std::make_unique<SparseBlockedToMMAPass>();
+}
+
 void xla::gpu::registerSparsePasses() {
   registerPass([] { return std::make_unique<AddSparseDotEncodingPass>(); });
+  registerPass([] { return std::make_unique<SparseBlockedToMMAPass>(); });
 }

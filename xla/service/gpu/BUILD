@@ -604,6 +604,7 @@ cc_library(
         "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:Transforms",
         "@triton//:TritonDialects",
+        "@triton//:TritonGPUToLLVM",
         "@triton//:TritonGPUTransforms",
     ],
 )
