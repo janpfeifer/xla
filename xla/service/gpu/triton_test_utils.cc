@@ -19,21 +19,28 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
+#include "absl/strings/substitute.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "third_party/re2/re2.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/utils/hlo_query.h"
 #include "xla/primitive_util.h"
 #include "xla/service/float_normalization.h"
 #include "xla/service/gpu/fusions/triton.h"
@@ -140,6 +147,93 @@ std::string TritonSupportTestParamsToString(
   return absl::StrCat(
       primitive_util::LowercasePrimitiveTypeName(data_type), "_",
       absl::StrReplaceAll(HloOpcodeString(opcode), {{"-", "_"}}));
+}
+
+namespace {
+
+// If the input hlos does not have an ENTRY computation, returns a copy of the
+// input hlo with an ENTRY computation added. Otherwise, returns the input hlo
+// as is.
+//
+// The added ENTRY computation has the same parameters as the computation called
+// `triton_computation` and has a root fusion instruction that simply calls the
+// `triton_computation` using the `__triton` backend kind. The ENTRY computation
+// has the same shape as the root instruction of the `triton_computation`.
+absl::StatusOr<std::string> MaybeAddStandardEntryComputation(
+    absl::string_view hlo_template) {
+  constexpr LazyRE2 entry_re{R"(ENTRY \w+ \{)"};
+  if (RE2::PartialMatch(hlo_template, *entry_re)) {
+    return std::string(hlo_template);
+  }
+
+  constexpr LazyRE2 triton_computation_re{
+      R"((triton_computation\s+\{\n(\s+.*\n)+\}))"};
+  std::string triton_computation;
+  if (!RE2::PartialMatch(hlo_template, *triton_computation_re,
+                         &triton_computation)) {
+    return absl::InvalidArgumentError(
+        "No computation with the name `triton_computation` found.");
+  }
+
+  constexpr LazyRE2 params_re{R"(\n((\s+.*\s+parameter\(\d\)\n)+))"};
+  std::string params;
+  RE2::PartialMatch(triton_computation, *params_re, &params);
+
+  constexpr LazyRE2 param_names_re{R"(\s+(\w+)\s+=.*\n)"};
+  std::string param_names = params;
+  RE2::GlobalReplace(&param_names, *param_names_re, "\\1, ");
+  if (!param_names.empty()) {
+    param_names.resize(param_names.size() - 2);  // Drop the final ", "
+  }
+
+  constexpr LazyRE2 root_shape_re{R"(ROOT\s+\w+\s+=\s+(\S+)\s+)"};
+  std::string root_shape;
+  if (!RE2::PartialMatch(triton_computation, *root_shape_re, &root_shape)) {
+    return absl::InvalidArgumentError(
+        "No root shape found in `triton_computation`.");
+  }
+
+  return absl::StrCat(hlo_template, "\n\nENTRY main {\n", params,
+                      "  ROOT triton_op = ", root_shape, " fusion(",
+                      param_names, R"(),
+    kind=kCustom, calls=triton_computation,
+    backend_config={"fusion_backend_config":{"kind":"__triton"}}
+})");
+}
+
+}  // namespace
+
+absl::StatusOr<TritonSupportTest::TestedInstruction>
+TritonSupportTest::ParseTemplateAndGetInstruction(
+    absl::string_view hlo_template, xla::PrimitiveType data_type,
+    xla::HloOpcode opcode) {
+  TF_ASSIGN_OR_RETURN(const std::string hlo_template_with_entry,
+                      MaybeAddStandardEntryComputation(hlo_template));
+  const std::string hlo_text =
+      absl::Substitute(hlo_template_with_entry,
+                       primitive_util::LowercasePrimitiveTypeName(data_type),
+                       HloOpcodeString(opcode));
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> module,
+                      ParseAndReturnVerifiedModule(hlo_text));
+  const HloComputation* computation =
+      module->GetComputationWithName("triton_computation");
+  const HloFusionInstruction* fusion = DynCast<HloFusionInstruction>(
+      module->entry_computation()->root_instruction());
+  if (fusion == nullptr) {
+    return absl::InvalidArgumentError(
+        "The computation's entry root is not a fusion.");
+  }
+  if (computation == nullptr) {
+    return absl::InvalidArgumentError(
+        "No computation with the name `triton_computation` found.");
+  }
+  const HloInstruction* instr =
+      hlo_query::GetFirstInstructionWithOpcode(*computation, opcode);
+  if (instr == nullptr) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "No instruction with opcode [%s] found.", HloOpcodeString(opcode)));
+  }
+  return TestedInstruction(std::move(module), *instr);
 }
 
 }  // namespace xla::gpu
