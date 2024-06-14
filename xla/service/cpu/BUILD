@@ -728,6 +728,7 @@ cc_library(
         "@tsl//tsl/lib/math:math_util",
         "@tsl//tsl/platform:errors",
         "@tsl//tsl/platform:logging",
+        "@tsl//tsl/platform:statusor",
     ],
 )
 
@@ -1311,6 +1312,7 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@llvm-project//mlir:AsmParser",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:statusor",
     ],

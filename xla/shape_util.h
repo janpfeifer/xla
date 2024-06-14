@@ -601,15 +601,29 @@ class ShapeUtil {
   //
   // The visitor function must have the signature
   //
+  //   absl::Status fn(const Shape& subshape, const ShapeIndex& index)
+  //
+  //   or for the non-status returning version
+  //
   //   void fn(const Shape& subshape, const ShapeIndex& index)
   template <typename Fn>
+  static absl::Status ForEachLeafShapeWithStatus(const Shape& shape, Fn&& fn) {
+    return ForEachSubshapeWithStatus(
+        shape, [&](const Shape& subshape, const ShapeIndex& index) {
+          if (IsLeafIndex(shape, index)) {
+            TF_RETURN_IF_ERROR(fn(subshape, index));
+          }
+          return absl::OkStatus();
+        });
+  }
+
+  template <typename Fn>
   static void ForEachLeafShape(const Shape& shape, Fn&& fn) {
-    ForEachSubshape(shape,
-                    [&](const Shape& sub_shape, const ShapeIndex& index) {
-                      if (IsLeafIndex(shape, index)) {
-                        fn(sub_shape, index);
-                      }
-                    });
+    ForEachLeafShapeWithStatus(shape, [&](const Shape& subshape,
+                                          const ShapeIndex& index) {
+      fn(subshape, index);
+      return absl::OkStatus();
+    }).IgnoreError();
   }
 
   // Variants of ForEach(Mutable)Subshape which propagate absl::Status from the

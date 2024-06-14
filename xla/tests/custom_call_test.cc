@@ -787,9 +787,121 @@ XLA_FFI_DEFINE_HANDLER(kVerifyR2Dimensions, VerifyR2Dimensions,
 XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), "__xla_test$$VerifyR2Dimensions",
                          "Host", kVerifyR2Dimensions);
 
+static absl::Status SwapTupleAnyBuffersToS16U32(ffi::AnyBuffer in_1,
+                                                ffi::AnyBuffer in_2,
+                                                ResultBufferR0<S16> out_1,
+                                                ResultBufferR0<U32> out_2) {
+  auto tuple_elem_1 = reinterpret_cast<uint32_t*>(in_1.data.opaque());
+  auto tuple_elem_2 = reinterpret_cast<int16_t*>(in_2.data.opaque());
+  out_1->data.base()[0] = tuple_elem_2[0];
+  out_2->data.base()[0] = tuple_elem_1[0];
+  return absl::OkStatus();
+}
+
+XLA_FFI_DEFINE_HANDLER(kSwapTupleAnyBuffersToS16U32,
+                       SwapTupleAnyBuffersToS16U32,
+                       ffi::Ffi::Bind()
+                           .Arg<ffi::AnyBuffer>()
+                           .Arg<ffi::AnyBuffer>()
+                           .Ret<ffi::BufferR0<S16>>()
+                           .Ret<ffi::BufferR0<U32>>());
+
+XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(),
+                         "__xla_test$$SwapTupleAnyBuffersToS16U32", "Host",
+                         kSwapTupleAnyBuffersToS16U32);
+
+static absl::Status SwapTupleU32S16ToS16U32(ffi::BufferR0<U32> in_1,
+                                            ffi::BufferR0<S16> in_2,
+                                            ResultBufferR0<S16> out_1,
+                                            ResultBufferR0<U32> out_2) {
+  auto tuple_elem_1 = in_1.data.base();
+  auto tuple_elem_2 = in_2.data.base();
+  out_1->data.base()[0] = tuple_elem_2[0];
+  out_2->data.base()[0] = tuple_elem_1[0];
+  return absl::OkStatus();
+}
+
+XLA_FFI_DEFINE_HANDLER(kSwapTupleU32S16ToS16U32, SwapTupleU32S16ToS16U32,
+                       (ffi::Ffi::Bind()
+                            .Arg<ffi::BufferR0<U32>>()
+                            .Arg<ffi::BufferR0<S16>>()
+                            .Ret<ffi::BufferR0<S16>>()
+                            .Ret<ffi::BufferR0<U32>>()));
+
+XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(),
+                         "__xla_test$$SwapTupleU32S16ToS16U32", "Host",
+                         kSwapTupleU32S16ToS16U32);
+
 }  // namespace
 
 using FfiCustomCallTest = CustomCallTest;
+
+// TODO(paruzelp): Move these tests down below prior to the review
+
+XLA_TEST_F(FfiCustomCallTest, SwapTupleAnyBuffersToS16U32) {
+  const char* const kModuleStr = R"(
+    HloModule m
+
+    ENTRY test {
+      p0 = (u32[], s16[]) parameter(0)
+      ROOT custom-call = (s16[], u32[]) custom-call(p0), custom_call_target="__xla_test$$SwapTupleAnyBuffersToS16U32", api_version=API_VERSION_TYPED_FFI
+    })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kModuleStr));
+
+  Literal arg0 = LiteralUtil::CreateR0<uint32_t>(0xDEADC0DE);
+  Literal arg1 = LiteralUtil::CreateR0<int16_t>(29);
+  Literal argument = LiteralUtil::MakeTuple({&arg0, &arg1});
+  Literal expected = LiteralUtil::MakeTuple({&arg1, &arg0});
+
+  TF_ASSERT_OK_AND_ASSIGN(auto result, Execute(std::move(module), {&argument}));
+  EXPECT_EQ(result, expected);
+}
+
+XLA_TEST_F(FfiCustomCallTest, IgnoresEmptyTupleParameter) {
+  const char* const kModuleStr = R"(
+    HloModule m
+
+    ENTRY test {
+      p0 = (u32[], s16[], ((), ())) parameter(0)
+      ROOT custom-call = (s16[], u32[]) custom-call(p0), custom_call_target="__xla_test$$SwapTupleAnyBuffersToS16U32", api_version=API_VERSION_TYPED_FFI
+    })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kModuleStr));
+
+  Literal arg0 = LiteralUtil::CreateR0<uint32_t>(0xDEADC0DE);
+  Literal arg1 = LiteralUtil::CreateR0<int16_t>(29);
+  Literal empty_tuple = LiteralUtil::MakeTuple({});
+  Literal nested_tuple = LiteralUtil::MakeTuple({&empty_tuple, &empty_tuple});
+  Literal argument = LiteralUtil::MakeTuple({&arg0, &arg1, &nested_tuple});
+  Literal expected = LiteralUtil::MakeTuple({&arg1, &arg0});
+
+  TF_ASSERT_OK_AND_ASSIGN(auto result, Execute(std::move(module), {&argument}));
+  EXPECT_EQ(result, expected);
+}
+
+XLA_TEST_F(FfiCustomCallTest, SwapTupleU32S16ToS16U32) {
+  const char* const kModuleStr = R"(
+    HloModule m
+
+    ENTRY test {
+      p0 = (u32[], s16[]) parameter(0)
+      ROOT custom-call = (s16[], u32[]) custom-call(p0), custom_call_target="__xla_test$$SwapTupleU32S16ToS16U32", api_version=API_VERSION_TYPED_FFI
+    })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kModuleStr));
+
+  Literal arg0 = LiteralUtil::CreateR0<uint32_t>(0xDEADC0DE);
+  Literal arg1 = LiteralUtil::CreateR0<int16_t>(29);
+  Literal argument = LiteralUtil::MakeTuple({&arg0, &arg1});
+  Literal expected = LiteralUtil::MakeTuple({&arg1, &arg0});
+
+  TF_ASSERT_OK_AND_ASSIGN(auto result, Execute(std::move(module), {&argument}));
+  EXPECT_EQ(result, expected);
+}
 
 XLA_TEST_F(FfiCustomCallTest, FfiReportsSuccess) {
   auto module = CreateNewVerifiedModule();
@@ -1279,7 +1391,6 @@ XLA_TEST_F(FfiCustomCallTest, FfiTupleOutput) {
 }
 
 XLA_TEST_F(FfiCustomCallTest, FfiNestedTupleOutput) {
-  GTEST_SKIP() << "Nested tuple outputs not yet implemented.";
   const char* const kModuleStr = R"(
     HloModule m
 
@@ -1308,7 +1419,6 @@ XLA_TEST_F(FfiCustomCallTest, FfiNestedTupleOutput) {
 }
 
 XLA_TEST_F(FfiCustomCallTest, FfiTupleInput) {
-  GTEST_SKIP() << "Tuple inputs not yet implemented.";
   const char* const kModuleStr = R"(
     HloModule m
 
@@ -1329,7 +1439,6 @@ XLA_TEST_F(FfiCustomCallTest, FfiTupleInput) {
 }
 
 XLA_TEST_F(FfiCustomCallTest, FfiNestedTupleInput) {
-  GTEST_SKIP() << "Nested tuple inputs not yet implemented.";
   const char* const kModuleStr = R"(
     HloModule m
 
