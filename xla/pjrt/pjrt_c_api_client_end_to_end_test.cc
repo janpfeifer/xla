@@ -35,7 +35,7 @@ limitations under the License.
 namespace xla {
 namespace {
 
-static void SetUpCpuPjRtApi() {
+static void LoadCpuPjRtApi() {
   std::string device_type = "cpu";
   auto status = ::pjrt::PjrtApi(device_type);
   if (!status.ok()) {
@@ -52,7 +52,7 @@ static void SetUpCpuPjRtApi() {
 }
 
 TEST(PjRtCApiClientTest, EndToEnd) {
-  SetUpCpuPjRtApi();
+  LoadCpuPjRtApi();
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
                           GetCApiClient("cpu"));
   LOG(INFO) << "\tplatform_name=" << client->platform_name()
