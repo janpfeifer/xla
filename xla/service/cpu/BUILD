@@ -1287,7 +1287,10 @@ cc_library(
     hdrs = ["runtime_single_threaded_matmul.h"],
     compatible_with = get_compatible_with_portable(),
     copts = runtime_copts(),
-    linkstatic = 1,
+    # Fix error dyld[34744]: symbol not found in flat namespace '___xla_cpu_runtime_EigenSingleThreadedMatMulF16'
+    # by commenting out the linkstatic=1 below:
+    #
+    # linkstatic = 1,
     visibility = ["//visibility:private"],
     deps = [
         "//xla/tsl/framework/contraction:eigen_contraction_kernel_no_mkl",
